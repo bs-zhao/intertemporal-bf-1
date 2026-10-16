@@ -240,7 +240,15 @@ def main():
     )
 
     adapted = workflow.adapter(simulator.sample(2))
-    print("adapted shapes:", {k: np.asarray(v).shape for k, v in adapted.items()})
+    adapted_shapes = {k: np.asarray(v).shape for k, v in adapted.items()}
+    print("adapted shapes:", adapted_shapes)
+
+    expected_inference_shape = (2, len(param_names))
+    if adapted_shapes.get("inference_variables") != expected_inference_shape:
+        raise RuntimeError(
+            f"Adapter shape error: expected inference_variables "
+            f"{expected_inference_shape}, got {adapted_shapes.get('inference_variables')}."
+        )
 
     lr = workflow.optimizer.learning_rate
     print("optimizer:", type(workflow.optimizer).__name__)
