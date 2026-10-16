@@ -600,7 +600,11 @@ def make_bayesflow_parameter_simulator(bf, model, seed):
         )
         redraw_stats["accepted"] += 1
 
-        out = {name: float(params[name]) for name in names}
+        # Return each scalar parameter as shape (1,), so bf.make_simulator batches it
+        # to (batch, 1). This matches the original BayesFlow training pipeline and
+        # ensures Adapter.concatenate(...) produces (batch, n_parameters), not a
+        # flattened (batch * n_parameters,) vector.
+        out = {name: np.asarray([float(params[name])], dtype=np.float64) for name in names}
         out["trials"] = encode_trials(sim_df)
         return out
 
