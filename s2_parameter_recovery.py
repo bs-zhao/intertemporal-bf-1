@@ -1,11 +1,4 @@
 #!/usr/bin/env python
-#SBATCH --account=PDE0114
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=24:00:00
-#SBATCH --job-name=bf8-recovery
-#SBATCH --output=slurm-%j.out
 
 """Parameter recovery and diagnostics for one trained eight-model posterior."""
 
