@@ -371,6 +371,444 @@ def plot_posterior_corr_panels(model_outputs, family, key, out_dir):
     fig.savefig(out_dir / f"{family.lower()}_{key}_panel.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
+
+# =============================================================================
+# Additional diagnostics for understanding WHY parameter recovery can be poor
+# =============================================================================
+
+def _parameter_axes(params, width=4.3, height=3.8):
+    ncols = 3
+    nrows = math.ceil(len(params) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(width * ncols, height * nrows))
+    return fig, np.asarray(axes).reshape(-1)
+
+
+def _quantile_bin_summaries(x, y, n_bins=8):
+    """Return robust equal-count bin centers, means, and standard errors."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    order = np.argsort(x)
+    chunks = np.array_split(order, min(n_bins, len(order)))
+    centers, means, ses = [], [], []
+    for idx in chunks:
+        if len(idx) == 0:
+            continue
+        yy = y[idx]
+        centers.append(float(np.mean(x[idx])))
+        means.append(float(np.mean(yy)))
+        ses.append(float(np.std(yy, ddof=1) / np.sqrt(len(yy))) if len(yy) > 1 else 0.0)
+    return np.asarray(centers), np.asarray(means), np.asarray(ses)
+
+
+def plot_sbc_calibration_ecdf(long_df, family, out_dir):
+    """
+    SBC rank ECDF difference plots using the fractional posterior ranks saved by s2.
+
+    s2's rank_u = fraction(posterior_draw <= ground_truth), which is exactly the
+    fractional rank quantity underlying BayesFlow calibration_ecdf. Using the
+    saved ranks avoids re-running posterior sampling. The band shown here is a
+    simultaneous 95% Dvoretzky-Kiefer-Wolfowitz band around the ideal uniform ECDF.
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty or "rank_u" not in d_family.columns:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model]
+        if d.empty:
+            continue
+        params = list(pd.unique(d["parameter"]))
+        fig, axes = _parameter_axes(params)
+
+        for ax, param in zip(axes, params):
+            u = d.loc[d["parameter"] == param, "rank_u"].to_numpy(dtype=float)
+            u = np.sort(np.clip(u[np.isfinite(u)], 0.0, 1.0))
+            n = len(u)
+            if n == 0:
+                ax.axis("off")
+                continue
+
+            ecdf = np.arange(1, n + 1, dtype=float) / n
+            diff = ecdf - u
+            eps = np.sqrt(np.log(2.0 / 0.05) / (2.0 * n))
+
+            ax.fill_between([0.0, 1.0], [-eps, -eps], [eps, eps], alpha=0.20)
+            ax.plot(u, diff, linewidth=1.5)
+            ax.axhline(0.0, linestyle="--", linewidth=1)
+            ax.set_xlim(0, 1)
+            ax.set_xlabel("Fractional posterior rank")
+            ax.set_ylabel("ECDF - Uniform")
+            ax.set_title(f"{param} (n={n})")
+
+        for ax in axes[len(params):]:
+            ax.axis("off")
+        fig.suptitle(f"{family}: SBC calibration ECDF difference — {model}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_calibration_ecdf.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_sbc_rank_histograms(long_df, family, out_dir, num_bins=10):
+    """
+    Rank histograms complement ECDF calibration plots.
+
+    Rough interpretation:
+      U-shaped     -> posterior often too narrow / overconfident
+      mound-shaped -> posterior often too wide / underconfident
+      skewed       -> systematic bias
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty or "rank_u" not in d_family.columns:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model]
+        if d.empty:
+            continue
+        params = list(pd.unique(d["parameter"]))
+        fig, axes = _parameter_axes(params)
+
+        for ax, param in zip(axes, params):
+            u = d.loc[d["parameter"] == param, "rank_u"].to_numpy(dtype=float)
+            u = np.clip(u[np.isfinite(u)], 0.0, 1.0)
+            n = len(u)
+            if n == 0:
+                ax.axis("off")
+                continue
+
+            counts, edges = np.histogram(u, bins=num_bins, range=(0.0, 1.0))
+            props = counts / n
+            centers = (edges[:-1] + edges[1:]) / 2
+            width = edges[1] - edges[0]
+
+            expected = 1.0 / num_bins
+            # Approximate 99% pointwise binomial band; useful as a visual guide.
+            se = np.sqrt(expected * (1.0 - expected) / n)
+            lo = max(0.0, expected - 2.576 * se)
+            hi = min(1.0, expected + 2.576 * se)
+
+            ax.bar(centers, props, width=0.9 * width)
+            ax.axhline(expected, linestyle="--", linewidth=1)
+            ax.fill_between([0.0, 1.0], [lo, lo], [hi, hi], alpha=0.16)
+            ax.set_xlim(0, 1)
+            ax.set_xlabel("Fractional posterior rank")
+            ax.set_ylabel("Proportion")
+            ax.set_title(param)
+
+        for ax in axes[len(params):]:
+            ax.axis("off")
+        fig.suptitle(f"{family}: SBC rank histograms — {model}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_calibration_rank_histogram.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_residual_vs_true(long_df, family, out_dir):
+    """Diagnose shrinkage, boundary effects, and nonlinear recovery bias."""
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model].copy()
+        if d.empty:
+            continue
+        d["residual"] = d["posterior_median"] - d["true"]
+        params = list(pd.unique(d["parameter"]))
+        fig, axes = _parameter_axes(params)
+
+        for ax, param in zip(axes, params):
+            sub = d[d["parameter"] == param]
+            x = sub["true"].to_numpy(dtype=float)
+            r = sub["residual"].to_numpy(dtype=float)
+            ax.scatter(x, r, alpha=0.25, s=10)
+            ax.axhline(0.0, linestyle="--", linewidth=1)
+
+            bx, by, bse = _quantile_bin_summaries(x, r, n_bins=8)
+            if len(bx):
+                ax.plot(bx, by, marker="o", linewidth=1.5)
+                ax.fill_between(bx, by - bse, by + bse, alpha=0.18)
+
+            ax.set_xlabel(f"True {param}")
+            ax.set_ylabel("Posterior median - true")
+            ax.set_title(param)
+
+        for ax in axes[len(params):]:
+            ax.axis("off")
+        fig.suptitle(f"{family}: residual vs true value — {model}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_residual_vs_true.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_conditional_coverage(long_df, family, out_dir):
+    """
+    Plot empirical 90% coverage over the true-parameter range.
+    This catches local failures hidden by acceptable overall coverage.
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty or "covered" not in d_family.columns:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model]
+        if d.empty:
+            continue
+        params = list(pd.unique(d["parameter"]))
+        fig, axes = _parameter_axes(params)
+
+        for ax, param in zip(axes, params):
+            sub = d[d["parameter"] == param]
+            x = sub["true"].to_numpy(dtype=float)
+            covered = sub["covered"].astype(float).to_numpy()
+            bx, by, bse = _quantile_bin_summaries(x, covered, n_bins=8)
+
+            if len(bx):
+                ax.plot(bx, by, marker="o", linewidth=1.5)
+                ax.fill_between(bx, np.maximum(0, by - bse), np.minimum(1, by + bse), alpha=0.18)
+            ax.axhline(0.90, linestyle="--", linewidth=1)
+            ax.set_ylim(0, 1)
+            ax.set_xlabel(f"True {param}")
+            ax.set_ylabel("Empirical 90% coverage")
+            ax.set_title(param)
+
+        for ax in axes[len(params):]:
+            ax.axis("off")
+        fig.suptitle(f"{family}: conditional interval coverage — {model}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_conditional_coverage.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_uncertainty_vs_error(long_df, family, out_dir):
+    """
+    Compare posterior uncertainty with realized recovery error.
+    If large errors systematically occur with tiny posterior SD, the amortizer is overconfident.
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty or "posterior_sd" not in d_family.columns:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model]
+        if d.empty:
+            continue
+        params = list(pd.unique(d["parameter"]))
+        fig, axes = _parameter_axes(params)
+
+        for ax, param in zip(axes, params):
+            sub = d[d["parameter"] == param]
+            sd = sub["posterior_sd"].to_numpy(dtype=float)
+            err = np.abs(
+                sub["posterior_median"].to_numpy(dtype=float)
+                - sub["true"].to_numpy(dtype=float)
+            )
+            ok = np.isfinite(sd) & np.isfinite(err)
+            sd, err = sd[ok], err[ok]
+            if len(sd):
+                ax.scatter(sd, err, alpha=0.25, s=10)
+                hi = max(float(np.max(sd)), float(np.max(err)))
+                ax.plot([0, hi], [0, hi], linestyle="--", linewidth=1)
+            ax.set_xlabel("Posterior SD")
+            ax.set_ylabel("|posterior median - true|")
+            ax.set_title(param)
+
+        for ax in axes[len(params):]:
+            ax.axis("off")
+        fig.suptitle(f"{family}: posterior uncertainty vs realized error — {model}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_uncertainty_vs_error.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_standardized_error(long_df, family, out_dir):
+    """
+    Heuristic standardized recovery error:
+        (posterior median - true) / posterior SD
+    Large shifts from zero indicate bias; very large spread flags overconfidence.
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty or "posterior_sd" not in d_family.columns:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model].copy()
+        if d.empty:
+            continue
+        sd = d["posterior_sd"].to_numpy(dtype=float)
+        err = (
+            d["posterior_median"].to_numpy(dtype=float)
+            - d["true"].to_numpy(dtype=float)
+        )
+        d["standardized_error"] = np.divide(
+            err,
+            sd,
+            out=np.full_like(err, np.nan, dtype=float),
+            where=np.isfinite(sd) & (sd > 0),
+        )
+
+        params = list(pd.unique(d["parameter"]))
+        arrays, labels = [], []
+        for p in params:
+            z = d.loc[d["parameter"] == p, "standardized_error"].to_numpy(dtype=float)
+            z = z[np.isfinite(z)]
+            if len(z):
+                arrays.append(z)
+                labels.append(p)
+
+        if not arrays:
+            continue
+        fig, ax = plt.subplots(figsize=(max(7.0, 1.0 * len(labels)), 5.0))
+        ax.boxplot(arrays, tick_labels=labels, showfliers=False)
+        ax.axhline(0.0, linestyle="--", linewidth=1)
+        ax.axhline(1.0, linestyle=":", linewidth=1)
+        ax.axhline(-1.0, linestyle=":", linewidth=1)
+        ax.tick_params(axis="x", rotation=45)
+        ax.set_ylabel("(posterior median - true) / posterior SD")
+        ax.set_title(f"{family}: standardized recovery error — {model}")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_standardized_error.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_recovery_error_correlation(long_df, family, out_dir):
+    """
+    Correlation of recovery residuals across parameters.
+    Strong off-diagonal structure is a direct clue for parameter trade-offs /
+    weak identifiability across simulated data sets.
+    """
+    d_family = long_df[long_df["family"] == family]
+    if d_family.empty:
+        return
+
+    for model in MODEL_FAMILIES[family]:
+        d = d_family[d_family["model"] == model].copy()
+        if d.empty:
+            continue
+        d["residual"] = d["posterior_median"] - d["true"]
+        piv = d.pivot(index="participant_id", columns="parameter", values="residual")
+        corr = piv.corr()
+        vals = corr.to_numpy(dtype=float)
+
+        fig, ax = plt.subplots(figsize=(max(6, 0.8 * len(corr.columns)), max(5, 0.7 * len(corr.columns))))
+        im = ax.imshow(vals, vmin=-1, vmax=1)
+        ax.set_xticks(range(len(corr.columns)))
+        ax.set_xticklabels(corr.columns, rotation=45, ha="right")
+        ax.set_yticks(range(len(corr.index)))
+        ax.set_yticklabels(corr.index)
+        ax.set_title(f"Recovery residual correlation — {model}")
+        for i in range(vals.shape[0]):
+            for j in range(vals.shape[1]):
+                if np.isfinite(vals[i, j]):
+                    ax.text(j, i, f"{vals[i, j]:.2f}", ha="center", va="center", fontsize=8)
+        fig.colorbar(im, ax=ax, label="Residual correlation")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{model}_recovery_error_correlation.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
+def compute_extra_diagnostic_metrics(long_df):
+    rows = []
+    if long_df.empty:
+        return pd.DataFrame()
+
+    for (family, model, parameter), d in long_df.groupby(["family", "model", "parameter"]):
+        true = d["true"].to_numpy(dtype=float)
+        est = d["posterior_median"].to_numpy(dtype=float)
+        resid = est - true
+        post_sd = d["posterior_sd"].to_numpy(dtype=float) if "posterior_sd" in d else np.full(len(d), np.nan)
+
+        if len(true) > 2 and np.std(true) > 0:
+            slope = float(np.cov(true, est, ddof=1)[0, 1] / np.var(true, ddof=1))
+            intercept = float(np.mean(est) - slope * np.mean(true))
+            residual_true_corr = float(np.corrcoef(true, resid)[0, 1]) if np.std(resid) > 0 else np.nan
+        else:
+            slope, intercept, residual_true_corr = np.nan, np.nan, np.nan
+
+        z = np.divide(
+            resid,
+            post_sd,
+            out=np.full_like(resid, np.nan, dtype=float),
+            where=np.isfinite(post_sd) & (post_sd > 0),
+        )
+        abs_err = np.abs(resid)
+        if np.sum(np.isfinite(post_sd) & np.isfinite(abs_err)) > 2:
+            ok = np.isfinite(post_sd) & np.isfinite(abs_err)
+            uncertainty_error_corr = (
+                float(np.corrcoef(post_sd[ok], abs_err[ok])[0, 1])
+                if np.std(post_sd[ok]) > 0 and np.std(abs_err[ok]) > 0
+                else np.nan
+            )
+        else:
+            uncertainty_error_corr = np.nan
+
+        coverage_range = np.nan
+        if "covered" in d.columns and len(d) >= 8:
+            bx, by, _ = _quantile_bin_summaries(true, d["covered"].astype(float).to_numpy(), n_bins=8)
+            if len(by):
+                coverage_range = float(np.nanmax(by) - np.nanmin(by))
+
+        rows.append(
+            dict(
+                family=family,
+                model=model,
+                parameter=parameter,
+                recovery_slope=slope,
+                recovery_intercept=intercept,
+                residual_true_corr=residual_true_corr,
+                mean_standardized_error=float(np.nanmean(z)) if np.isfinite(z).any() else np.nan,
+                sd_standardized_error=float(np.nanstd(z, ddof=1)) if np.isfinite(z).sum() > 1 else np.nan,
+                uncertainty_error_corr=uncertainty_error_corr,
+                conditional_coverage_range=coverage_range,
+            )
+        )
+
+    return pd.DataFrame(rows)
+
+
+def plot_extra_metric_heatmaps(extra_df, family, out_dir):
+    if extra_df.empty:
+        return
+    metrics = [
+        "recovery_slope",
+        "residual_true_corr",
+        "mean_standardized_error",
+        "sd_standardized_error",
+        "conditional_coverage_range",
+    ]
+    d_family = extra_df[extra_df["family"] == family]
+    if d_family.empty:
+        return
+
+    for metric in metrics:
+        piv = d_family.pivot(index="model", columns="parameter", values=metric)
+        piv = piv.reindex(MODEL_FAMILIES[family])
+        vals = piv.to_numpy(dtype=float)
+        if not np.isfinite(vals).any():
+            continue
+
+        fig, ax = plt.subplots(figsize=(max(6, 0.9 * len(piv.columns)), max(4, 0.8 * len(piv.index))))
+        im = ax.imshow(vals, aspect="auto")
+        ax.set_xticks(range(len(piv.columns)))
+        ax.set_xticklabels(piv.columns, rotation=45, ha="right")
+        ax.set_yticks(range(len(piv.index)))
+        ax.set_yticklabels([nice_model_name(x) for x in piv.index])
+        ax.set_title(f"{family}: {metric}")
+        for i in range(vals.shape[0]):
+            for j in range(vals.shape[1]):
+                if np.isfinite(vals[i, j]):
+                    ax.text(j, i, f"{vals[i, j]:.2f}", ha="center", va="center", fontsize=8)
+        fig.colorbar(im, ax=ax, label=metric)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{family.lower()}_{metric}_diagnostic_heatmap.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
 def write_summary_json(metrics_df, out_dir):
     summary = {}
     if not metrics_df.empty:
@@ -409,6 +847,14 @@ def make_family_package(metrics_df, long_df, history_df, model_outputs, family, 
     plot_coverage_bars(metrics_df, family, out_dir)
     plot_posterior_corr_panels(model_outputs, family, "corr_signed", out_dir)
     plot_posterior_corr_panels(model_outputs, family, "corr_abs", out_dir)
+    # Additional diagnostics; all existing plots above are intentionally unchanged.
+    plot_sbc_calibration_ecdf(long_df, family, out_dir)
+    plot_sbc_rank_histograms(long_df, family, out_dir)
+    plot_residual_vs_true(long_df, family, out_dir)
+    plot_conditional_coverage(long_df, family, out_dir)
+    plot_uncertainty_vs_error(long_df, family, out_dir)
+    plot_standardized_error(long_df, family, out_dir)
+    plot_recovery_error_correlation(long_df, family, out_dir)
 
 def make_overall_family_summary(metrics_df, out_dir):
     if metrics_df.empty or "pearson_r" not in metrics_df.columns or "rmse" not in metrics_df.columns:
@@ -502,8 +948,20 @@ def main():
     save_tables(metrics_df, long_df, history_df, summary_root)
     write_summary_json(metrics_df, summary_root)
 
+    extra_diagnostic_metrics = compute_extra_diagnostic_metrics(long_df)
+    if not extra_diagnostic_metrics.empty:
+        extra_diagnostic_metrics.to_csv(
+            summary_root / "all_models_extra_diagnostic_metrics.csv",
+            index=False,
+        )
+
     for family in ["DFT", "RUDT"]:
         make_family_package(metrics_df, long_df, history_df, model_outputs, family, summary_root)
+        plot_extra_metric_heatmaps(
+            extra_diagnostic_metrics,
+            family,
+            summary_root / family.lower(),
+        )
 
     make_overall_family_summary(metrics_df, summary_root)
 
