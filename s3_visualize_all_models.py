@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import argparse, json, math
+import argparse, json, math, subprocess, sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -22,11 +22,11 @@ ALL_MODELS = DFT_MODELS + RUDT_MODELS
 
 PREFERRED_METRICS = [
     "pearson_r", "spearman_rho", "rmse", "nrmse_by_true_sd",
-    "mae", "bias", "coverage_90", "mean_ci_width", "posterior_contraction",
+    "mae", "bias", "coverage_90", "mean_ci_width_90", "posterior_contraction",
     "rounded_exact_accuracy", "rounded_rmse",
 ]
 HEATMAP_METRICS = ["pearson_r", "rmse", "coverage_90", "posterior_contraction"]
-LOWER_IS_BETTER = {"rmse", "nrmse_by_true_sd", "mae", "mean_ci_width", "rounded_rmse"}
+LOWER_IS_BETTER = {"rmse", "nrmse_by_true_sd", "mae", "mean_ci_width_90", "rounded_rmse"}
 
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -61,6 +61,59 @@ def gather_model_outputs(output_root, model, mode):
         "corr_signed": load_csv_if_exists(diag / "posterior_correlation_mean_signed.csv"),
         "corr_abs": load_csv_if_exists(diag / "posterior_correlation_mean_abs.csv"),
     }
+
+
+def diagnostics_complete(output_root, model, mode):
+    diag = Path(output_root) / model / mode / "diagnostics"
+    required = [
+        diag / "parameter_recovery_metrics.csv",
+        diag / "parameter_recovery_long.csv",
+        diag / "posterior_correlation_mean_signed.csv",
+        diag / "posterior_correlation_mean_abs.csv",
+    ]
+    return all(p.exists() for p in required)
+
+
+def ensure_trained_models_exist(output_root, mode):
+    missing = []
+    for model in ALL_MODELS:
+        p = Path(output_root) / model / mode / "posterior_final.keras"
+        if not p.exists():
+            missing.append(str(p))
+    if missing:
+        raise FileNotFoundError(
+            "Missing trained posterior(s):\n  " + "\n  ".join(missing)
+        )
+
+
+def run_missing_recoveries(output_root, mode, n_test, posterior_draws, batch_size, force=False):
+    ensure_trained_models_exist(output_root, mode)
+
+    for i, model in enumerate(ALL_MODELS, start=1):
+        if diagnostics_complete(output_root, model, mode) and not force:
+            print(f"[{i}/8] {model}: diagnostics already exist; reusing them.")
+            continue
+
+        cmd = [
+            sys.executable,
+            "s2_parameter_recovery.py",
+            "--model", model,
+            "--mode", mode,
+            "--n-test", str(n_test),
+            "--posterior-draws", str(posterior_draws),
+            "--batch-size", str(batch_size),
+        ]
+        print("\n" + "=" * 80)
+        print(f"[{i}/8] PARAMETER RECOVERY: {model}")
+        print(" ".join(cmd))
+        print("=" * 80, flush=True)
+        subprocess.run(cmd, check=True)
+
+        if not diagnostics_complete(output_root, model, mode):
+            raise RuntimeError(
+                f"{model}: s2 finished but expected diagnostics files are still missing."
+            )
+
 
 def concat_metrics(model_outputs):
     frames = []
@@ -205,7 +258,7 @@ def plot_recovery_scatter_per_model(long_df, family, out_dir):
         for ax, param in zip(axes, params):
             sub = d[d["parameter"] == param]
             x = sub["true"].to_numpy(dtype=float)
-            y = sub["estimate"].to_numpy(dtype=float)
+            y = sub["posterior_median"].to_numpy(dtype=float)
             ax.scatter(x, y, alpha=0.35, s=12)
             lo = np.nanmin([np.nanmin(x), np.nanmin(y)])
             hi = np.nanmax([np.nanmax(x), np.nanmax(y)])
@@ -227,7 +280,7 @@ def plot_abs_error_boxplots(long_df, family, out_dir):
     d = long_df[long_df["family"] == family].copy()
     if d.empty:
         return
-    d["abs_error"] = np.abs(d["estimate"] - d["true"])
+    d["abs_error"] = np.abs(d["posterior_median"] - d["true"])
     params = list(pd.unique(d["parameter"]))
     fig, axes = plt.subplots(len(params), 1, figsize=(8.5, 2.8*len(params)))
     if len(params) == 1:
@@ -382,30 +435,87 @@ def make_overall_family_summary(metrics_df, out_dir):
     plt.close(fig)
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Run/collect parameter recovery for all 8 trained models and create DFT/RUDT visual summaries."
+    )
     parser.add_argument("--mode", default="formal", choices=["test", "formal"])
     parser.add_argument("--output-root", default="output")
+    parser.add_argument("--n-test", type=int, default=None)
+    parser.add_argument("--posterior-draws", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--force-recovery",
+        action="store_true",
+        help="Re-run parameter recovery even when diagnostics already exist.",
+    )
+    parser.add_argument(
+        "--skip-recovery",
+        action="store_true",
+        help="Do not run s2 automatically; only summarize existing diagnostics.",
+    )
     args = parser.parse_args()
 
     output_root = Path(args.output_root)
     summary_root = ensure_dir(output_root / "all_models_visualization" / args.mode)
+
+    if args.mode == "formal":
+        n_test = 1000 if args.n_test is None else args.n_test
+        posterior_draws = 1000 if args.posterior_draws is None else args.posterior_draws
+        batch_size = 25 if args.batch_size is None else args.batch_size
+    else:
+        n_test = 32 if args.n_test is None else args.n_test
+        posterior_draws = 100 if args.posterior_draws is None else args.posterior_draws
+        batch_size = 16 if args.batch_size is None else args.batch_size
+
+    if not args.skip_recovery:
+        run_missing_recoveries(
+            output_root=output_root,
+            mode=args.mode,
+            n_test=n_test,
+            posterior_draws=posterior_draws,
+            batch_size=batch_size,
+            force=args.force_recovery,
+        )
 
     model_outputs = [gather_model_outputs(output_root, model, args.mode) for model in ALL_MODELS]
     metrics_df = concat_metrics(model_outputs)
     long_df = concat_long(model_outputs)
     history_df = concat_history(model_outputs)
 
+    if metrics_df.empty:
+        raise RuntimeError(
+            "No parameter-recovery metrics were found. "
+            "Run without --skip-recovery, or run s2_parameter_recovery.py first."
+        )
+    if long_df.empty:
+        raise RuntimeError(
+            "No parameter_recovery_long.csv files were found after recovery."
+        )
+
+    expected_families = {"DFT", "RUDT"}
+    got_families = set(metrics_df["family"].dropna().unique())
+    if not expected_families.issubset(got_families):
+        raise RuntimeError(
+            f"Incomplete recovery results: expected families {expected_families}, got {got_families}."
+        )
+
     save_tables(metrics_df, long_df, history_df, summary_root)
     write_summary_json(metrics_df, summary_root)
+
     for family in ["DFT", "RUDT"]:
         make_family_package(metrics_df, long_df, history_df, model_outputs, family, summary_root)
+
     make_overall_family_summary(metrics_df, summary_root)
 
-    print("=" * 80)
-    print("Visualization complete")
+    print("\n" + "=" * 80)
+    print("ALL 8 MODELS COMPLETE")
     print("Mode:", args.mode)
-    print("Summary output:", summary_root)
+    print("Parameter recovery:")
+    print(f"  n_test={n_test}, posterior_draws={posterior_draws}, batch_size={batch_size}")
+    print("Combined visualization output:")
+    print(" ", summary_root)
     print("=" * 80)
+
 
 if __name__ == "__main__":
     main()
