@@ -1,21 +1,24 @@
 # intertemporal-bf-1
 
-Self-contained BayesFlow parameter-recovery project for 8 DFT/RUDT models
+Standalone BayesFlow parameter-recovery project for 8 intertemporal-choice DFT/RUDT models.
 
-This repository is **standalone**. It does not import model code or data from any other repository.
-After cloning it on OSC, activate the `bf312` environment, `cd` into the repository root,
-and run the scripts directly.
+The repository is designed to be cloned and run directly on Ohio Supercomputer Center (OSC)
+without requiring a pre-existing Conda environment or a pre-installed BayesFlow installation.
 
-## Files
+## Repository structure
 
 ```text
 intertemporal-bf-1/
-├── simulators_8models.py          # all 8 models, priors, 96-trial design, screening
-├── s1_train_parameter_posterior.py # train one model's BayesFlow posterior
-├── s2_parameter_recovery.py        # parameter recovery + diagnostics
+├── simulators_8models.py
+├── s1_train_parameter_posterior.py
+├── s2_parameter_recovery.py
+├── setup_osc.sh
+├── verify_gpu.sbatch
+├── train.sbatch
+├── recovery.sbatch
 ├── requirements.txt
-├── README.md
-└── output/                         # created automatically
+├── .gitignore
+└── output/                       # created automatically; not tracked by Git
 ```
 
 ## Eight models
@@ -31,8 +34,6 @@ rudt_asym_fixed
 rudt_asym_decreasing
 ```
 
-Parameter sets:
-
 | model | parameters |
 |---|---|
 | `dft_pow_basic_none` | `w, theta_star, alpha, beta, Ter` |
@@ -44,36 +45,34 @@ Parameter sets:
 | `rudt_asym_fixed` | `alpha, beta, s, c, theta, Ter, delta_S, delta_L` |
 | `rudt_asym_decreasing` | `alpha, beta, s, c, theta, Ter, delta_S, delta_L, n` |
 
-## Self-contained Demurie design
+## Self-contained simulator
 
-`simulators_8models.py` reconstructs the Demurie choice design directly:
+All model formulas, priors, screening rules, the 96-trial Demurie design, and trial encoding are
+implemented locally in `simulators_8models.py`.
+
+The project does **not** import code or data from
+`individual-difference-Intertemporal-choice` or any other repository.
+
+The Demurie design is reconstructed locally:
 
 - SS amount: EUR 0, 5, 10, 20, 30 today
 - LL option: EUR 30 after 0, 1, 2, 7, or 14 days
 - 4 repetitions per problem
-- EUR30-today vs EUR30-today is removed because both models are undefined there
-- 24 problems x 4 repetitions = **96 trials**
-- one fixed shuffle with `random_state=42`, matching the supplied simulator notebook
+- EUR30 today vs EUR30 today removed
+- 24 problems x 4 repetitions = 96 trials
+- fixed shuffle with `random_state=42`
 
-No `Demurie_2013.csv` is required.
-
-### Frozen Ter prior
-
-The supplied main-branch ZIP does not include `Demurie_2013.csv`, while the original
-`demurie2013_sim.ipynb` computed the Ter prior from that file. To make this repository truly
-standalone, the values printed by that notebook are frozen locally:
+The original simulator notebook derived the Ter prior from `Demurie_2013.csv`.
+Because this standalone project does not carry that participant-level dataset, the values already
+reported by the source notebook are frozen locally:
 
 ```python
 TER_POP = (0.694, 0.252, 0.2, 1.31)
 ```
 
-That means truncated Normal(mean=0.694, SD=0.252, lower=0.2, upper=1.31).
-Everything else in the prior/simulator is implemented locally from the supplied source.
+## Neural posterior architecture
 
-## Neural posterior training
-
-The neural-network/training layer is intentionally kept the same as the previous two-model
-BayesFlow pipeline:
+Training intentionally follows the previous BayesFlow pipeline:
 
 ```text
 BayesFlow 2.0.13
@@ -88,110 +87,165 @@ batch size = 64
 validation_data = 2000
 ```
 
-Formal mode uses a 5000-epoch hard ceiling and normally stops by EarlyStopping.
-Test mode runs exactly 5 epochs.
+Formal mode has a 5000-epoch hard ceiling and normally stops by EarlyStopping.
+Test mode runs 5 epochs.
 
-## OSC: clone and run
+# OSC setup
 
-Clone the project and enter the repository root:
+## 1. Clone
+
+Example on Pitzer:
 
 ```bash
 cd /fs/scratch/PDE0114/projects
 git clone https://github.com/bs-zhao/intertemporal-bf-1.git
 cd intertemporal-bf-1
-conda activate bf312
 ```
 
-Verify the environment if desired:
+No Conda environment needs to be activated.
+
+## 2. Install BayesFlow and project dependencies once
+
+Run:
 
 ```bash
-python -c "import bayesflow, keras, torch, ssms; print('BayesFlow', bayesflow.__version__); print('Keras backend', keras.backend.backend()); print('PyTorch', torch.__version__); print('CUDA', torch.cuda.is_available())"
+bash setup_osc.sh
 ```
 
-If the existing `bf312` environment is missing the non-PyTorch dependencies:
+The setup script:
+
+1. resets loaded OSC modules;
+2. loads OSC's `pytorch/2.8.0` module;
+3. creates `.python_packages/` inside this repository;
+4. installs `bayesflow==2.0.13`, SSMS, NumPy, SciPy, pandas, and matplotlib there;
+5. verifies the imports and the Keras torch backend.
+
+PyTorch itself is **not** installed with pip. The project uses OSC's centrally installed
+GPU-enabled PyTorch module.
+
+The project-local package directory is ignored by Git.
+
+If you ever want a clean reinstall:
 
 ```bash
-python -m pip install -r requirements.txt
+rm -rf .python_packages
+bash setup_osc.sh
 ```
 
-The scripts use paths relative to the repository root, so run `sbatch` from this directory.
+## 3. Verify GPU access
 
-Five-epoch smoke test:
+After setup:
 
 ```bash
-sbatch s1_train_parameter_posterior.py --model rudt_sym_fixed --mode test
+sbatch verify_gpu.sbatch
+```
+
+Check the resulting:
+
+```text
+slurm-verify-<jobid>.out
+```
+
+A successful job should report:
+
+```text
+BayesFlow: 2.0.13
+Keras backend: torch
+CUDA available: True
+CUDA device count: 1
+GPU: ...
+Environment verification passed.
+```
+
+This check is performed inside an actual GPU allocation. CUDA can legitimately be unavailable on
+a login node, so the GPU check should be done through Slurm.
+
+# Training
+
+Do **not** submit the Python file itself with `sbatch`.
+Use `train.sbatch`, which loads the OSC PyTorch module and activates the repository-local
+Python packages before launching the Python training script.
+
+Five-epoch test:
+
+```bash
+sbatch train.sbatch --model rudt_sym_fixed --mode test
 ```
 
 Formal training:
 
 ```bash
-sbatch s1_train_parameter_posterior.py --model rudt_sym_fixed --mode formal
+sbatch train.sbatch --model rudt_sym_fixed --mode formal
 ```
 
 Another example:
 
 ```bash
-sbatch s1_train_parameter_posterior.py --model rudt_asym_decreasing --mode formal
+sbatch train.sbatch --model rudt_asym_decreasing --mode formal
 ```
 
-The `.py` file itself contains the Slurm header:
+To intentionally retrain an existing model/mode:
+
+```bash
+sbatch train.sbatch --model rudt_sym_fixed --mode formal --overwrite
+```
+
+The training wrapper currently requests:
 
 ```text
 account = PDE0114
-gpu = 1
-cpus = 4
+GPU = 1
+CPU = 4
 memory = 32 GB
 walltime = 7 days
 ```
 
 ## Training outputs
 
-For example:
+Example:
 
 ```text
 output/
 └── rudt_sym_fixed/
-    ├── test/
-    │   ├── checkpoints/
-    │   ├── posterior_final.keras
-    │   ├── training_history.csv
-    │   ├── training_metadata.json
-    │   └── training_summary.json
     └── formal/
-        └── ...
+        ├── checkpoints/
+        ├── posterior_final.keras
+        ├── training_history.csv
+        ├── training_metadata.json
+        └── training_summary.json
 ```
 
-Different models and modes never overwrite one another.
+Each model and mode has its own directory.
 
-## Parameter recovery / diagnostics
+# Parameter recovery and diagnostics
 
-After training:
+After a network has been trained:
 
 ```bash
-sbatch s2_parameter_recovery.py --model rudt_sym_fixed --mode formal
+sbatch recovery.sbatch --model rudt_sym_fixed --mode formal
 ```
 
-For a lightweight test:
+For the test-mode network:
 
 ```bash
-python s2_parameter_recovery.py --model rudt_sym_fixed --mode test
+sbatch recovery.sbatch --model rudt_sym_fixed --mode test
 ```
 
-Optional overrides:
+Optional diagnostic-size overrides:
 
 ```bash
-python s2_parameter_recovery.py --model rudt_sym_fixed --mode formal --n-test 500 --posterior-draws 500 --batch-size 20
+sbatch recovery.sbatch --model rudt_sym_fixed --mode formal --n-test 500 --posterior-draws 500 --batch-size 20
 ```
 
 Formal defaults:
 
 ```text
 held-out participants = 1000
-posterior draws / participant = 1000
+posterior draws per participant = 1000
 inference batch size = 25
 ```
 
-Diagnostics are written under the same model/mode directory:
+Outputs:
 
 ```text
 output/<model>/<mode>/diagnostics/
@@ -204,45 +258,50 @@ output/<model>/<mode>/diagnostics/
     ├── training_loss.png
     ├── learning_rate.png
     ├── parameter_recovery_scatter.png
-    ├── parameter_recovery_scatter.png
     ├── coverage_90.png
     ├── posterior_contraction.png
     ├── posterior_correlation_mean_signed.png
     ├── posterior_correlation_mean_abs.png
-    ├── training_loss.png
-    ├── learning_rate.png
-    └── n_recovery_confusion.png   # only for decreasing RUDT models
+    └── n_recovery_confusion.png
 ```
 
-Metrics include Pearson `r`, Spearman rho, RMSE, NRMSE, MAE, bias, 90% interval coverage,
-mean interval width, posterior contraction, and posterior-rank calibration statistics.
+Metrics include Pearson correlation, Spearman correlation, RMSE, normalized RMSE, MAE, bias,
+90% posterior interval coverage, interval width, posterior contraction, and posterior-rank
+calibration diagnostics.
 
-## Note about `n`
+## Decreasing-threshold RUDT parameter `n`
 
-`n` is an integer in the two decreasing-threshold RUDT simulators. Because the explicit
-requirement is to keep the same BayesFlow neural-posterior architecture used previously,
-`n` is represented as a continuous target in the same `CouplingFlow`. Diagnostics therefore
-report both the raw posterior median and rounded-`n` recovery, including exact rounded
-accuracy and an `n` confusion matrix.
+`n` is an integer simulator parameter in:
 
-## Quick start
+```text
+rudt_sym_decreasing
+rudt_asym_decreasing
+```
 
-Five-epoch smoke test:
+The neural posterior architecture is intentionally kept identical to the earlier continuous
+CouplingFlow pipeline, so `n` is learned as a continuous target. Diagnostics additionally round
+the posterior median to the allowed integer range and report discrete recovery accuracy and a
+confusion matrix.
+
+# Minimal OSC workflow
 
 ```bash
-sbatch s1_train_parameter_posterior.py --model rudt_sym_fixed --mode test
+cd /fs/scratch/PDE0114/projects
+git clone https://github.com/bs-zhao/intertemporal-bf-1.git
+cd intertemporal-bf-1
+bash setup_osc.sh
+sbatch verify_gpu.sbatch
+sbatch train.sbatch --model rudt_sym_fixed --mode test
 ```
 
-Formal training:
+After the 5-epoch smoke test succeeds:
 
 ```bash
-sbatch s1_train_parameter_posterior.py --model rudt_sym_fixed --mode formal
+sbatch train.sbatch --model rudt_sym_fixed --mode formal
 ```
 
-Parameter recovery after training:
+After formal training finishes:
 
 ```bash
-sbatch s2_parameter_recovery.py --model rudt_sym_fixed --mode formal
+sbatch recovery.sbatch --model rudt_sym_fixed --mode formal
 ```
-
-All generated results are written under `output/`, which is ignored by Git.
