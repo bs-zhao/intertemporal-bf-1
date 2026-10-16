@@ -1,5 +1,5 @@
 bayesflow==2.0.13
-ssms
+ssm-simulators
 numpy
 scipy
 pandas
