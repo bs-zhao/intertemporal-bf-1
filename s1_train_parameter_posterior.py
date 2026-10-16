@@ -1,11 +1,4 @@
 #!/usr/bin/env python
-#SBATCH --account=PDE0114
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=7-00:00:00
-#SBATCH --job-name=bf8-param
-#SBATCH --output=slurm-%j.out
 
 """
 Train one BayesFlow neural parameter posterior for one of the 8 self-contained models.
@@ -17,8 +10,8 @@ This repository is standalone. This script imports ONLY the local
 
 Run from the repository root:
 
-    sbatch s1_train_parameter_posterior.py --model dft_pow_basic_none --mode test
-    sbatch s1_train_parameter_posterior.py --model rudt_asym_decreasing --mode formal
+    sbatch train.sbatch --model dft_pow_basic_none --mode test
+    sbatch train.sbatch --model rudt_asym_decreasing --mode formal
 
 Neural-network/training settings intentionally follow the previous DFT/RUDT BayesFlow
 pipeline. Only the model/simulator layer has changed.
