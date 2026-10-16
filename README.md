@@ -204,17 +204,18 @@ output/<model>/<mode>/diagnostics/
     ├── training_loss.png
     ├── learning_rate.png
     ├── parameter_recovery_scatter.png
-    ├── parameter_recovery_error.png
-    ├── posterior_rank_calibration.png
+    ├── parameter_recovery_scatter.png
     ├── coverage_90.png
     ├── posterior_contraction.png
     ├── posterior_correlation_mean_signed.png
     ├── posterior_correlation_mean_abs.png
+    ├── training_loss.png
+    ├── learning_rate.png
     └── n_recovery_confusion.png   # only for decreasing RUDT models
 ```
 
 Metrics include Pearson `r`, Spearman rho, RMSE, NRMSE, MAE, bias, 90% interval coverage,
-mean interval width, posterior contraction, and posterior-rank calibration diagnostics.
+mean interval width, posterior contraction, and posterior-rank calibration statistics.
 
 ## Note about `n`
 
