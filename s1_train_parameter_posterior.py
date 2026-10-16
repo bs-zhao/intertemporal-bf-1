@@ -13,8 +13,7 @@ Train one BayesFlow neural parameter posterior for one of the 8 self-contained m
 IMPORTANT
 ---------
 This repository is standalone. This script imports ONLY the local
-`simulators_8models.py`; it does not import ../simulator, ../data, or any main-branch
-model code.
+`simulators_8models.py`; it does not import model code or data from any other repository.
 
 Run from the repository root:
 
