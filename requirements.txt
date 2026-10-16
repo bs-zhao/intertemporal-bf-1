@@ -1,0 +1,6 @@
+bayesflow==2.0.13
+ssms
+numpy
+scipy
+pandas
+matplotlib
