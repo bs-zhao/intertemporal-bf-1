@@ -2,3 +2,4 @@ output/
 slurm-*.out
 __pycache__/
 *.pyc
+.python_packages/
