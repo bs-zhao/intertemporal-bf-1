@@ -25,7 +25,7 @@ PREFERRED_METRICS = [
     "mae", "bias", "coverage_90", "mean_ci_width_90", "posterior_contraction",
     "rounded_exact_accuracy", "rounded_rmse",
 ]
-HEATMAP_METRICS = ["pearson_r", "rmse", "coverage_90", "posterior_contraction"]
+HEATMAP_METRICS = ["pearson_r", "rmse", "coverage_90", "posterior_contraction", "nrmse_by_true_sd", "bias", "mean_ci_width_90", "rank_uniform_ks"]
 LOWER_IS_BETTER = {"rmse", "nrmse_by_true_sd", "mae", "mean_ci_width_90", "rounded_rmse"}
 
 def ensure_dir(path):
